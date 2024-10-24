@@ -1117,16 +1117,15 @@ def compute_visibility(receiver_position, satellite_positions, elevation_mask=10
 
 import numpy as np
 import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
 from datetime import datetime, timedelta
 from math import radians, sin, cos, atan2, sqrt, pi, degrees
 
-# Function to calculate ECEF coordinates from orbital parameters
-def calculate_ecef(satellite_params, start_time, duration_hours, resolution_seconds=60):
+# Updated function to calculate ECEF positions based on time
+def calculate_ecef(satellite_params, current_time):
     # Constants
     mu = 3.986004418e14  # Earth's gravitational parameter (m^3/s^2)
     omega_e = 7.2921159e-5  # Earth's rotation rate (rad/s)
-    
+
     # Satellite parameters
     epoch = datetime.fromisoformat(satellite_params["EPOCH"])
     mean_motion = satellite_params["MEAN_MOTION"] * 2 * pi / 86400  # rev/day to rad/s
@@ -1134,58 +1133,89 @@ def calculate_ecef(satellite_params, start_time, duration_hours, resolution_seco
     inclination = radians(satellite_params["INCLINATION"])
     ra_of_asc_node = radians(satellite_params["RA_OF_ASC_NODE"])
     arg_of_pericenter = radians(satellite_params["ARG_OF_PERICENTER"])
-    
-    # Time intervals in seconds
-    total_seconds = int(duration_hours * 3600)
-    time_steps = np.arange(0, total_seconds, resolution_seconds)
-    positions = []
-    
-    for t in time_steps:
-        # Calculate the mean anomaly at time t
-        mean_anomaly = radians(satellite_params["MEAN_ANOMALY"]) + mean_motion * t
-        E = mean_anomaly  # Initial guess for eccentric anomaly
-        
-        # Solve Kepler's equation for eccentric anomaly
-        for _ in range(10):
-            E = mean_anomaly + eccentricity * sin(E)
-        
-        # Calculate true anomaly
-        true_anomaly = 2 * atan2(sqrt(1 + eccentricity) * sin(E / 2), sqrt(1 - eccentricity) * cos(E / 2))
-        
-        # Calculate orbital radius
-        a = (mu / (mean_motion ** 2)) ** (1 / 3)  # semi-major axis
-        r = a * (1 - eccentricity * cos(E))
-        
-        # Calculate position in ECI
-        x_orb = r * (cos(arg_of_pericenter) * cos(true_anomaly) - sin(arg_of_pericenter) * sin(true_anomaly) * cos(inclination))
-        y_orb = r * (sin(arg_of_pericenter) * cos(true_anomaly) + cos(arg_of_pericenter) * sin(true_anomaly) * cos(inclination))
-        z_orb = r * (sin(true_anomaly) * sin(inclination))
-        
-        # Transform ECI to ECEF
-        theta = omega_e * t  # Earth rotation angle
-        x_ecef = x_orb * cos(theta) + y_orb * sin(theta)
-        y_ecef = -x_orb * sin(theta) + y_orb * cos(theta)
-        z_ecef = z_orb
-        
-        positions.append((x_ecef, y_ecef, z_ecef))
-    
-    # Generate actual times based on the start time
-    actual_times = [start_time + timedelta(seconds=int(t)) for t in time_steps]
 
-    
-    return np.array(positions), actual_times
+    # Time since epoch in seconds
+    delta_t = (current_time - epoch).total_seconds()
 
-# Function to plot the DOP values over time with actual datetime values
-def plot_dop_over_time(dop_values, actual_times):
+    # Calculate the mean anomaly at time delta_t
+    mean_anomaly = radians(satellite_params["MEAN_ANOMALY"]) + mean_motion * delta_t
+    E = mean_anomaly  # Initial guess for eccentric anomaly
+
+    # Solve Kepler's equation for eccentric anomaly
+    for _ in range(10):
+        E = mean_anomaly + eccentricity * sin(E)
+
+    # Calculate true anomaly
+    true_anomaly = 2 * atan2(sqrt(1 + eccentricity) * sin(E / 2), sqrt(1 - eccentricity) * cos(E / 2))
+
+    # Calculate orbital radius
+    a = (mu / (mean_motion ** 2)) ** (1 / 3)  # semi-major axis
+    r = a * (1 - eccentricity * cos(E))
+
+    # Calculate position in ECI
+    x_orb = r * (cos(arg_of_pericenter) * cos(true_anomaly) - sin(arg_of_pericenter) * sin(true_anomaly) * cos(inclination))
+    y_orb = r * (sin(arg_of_pericenter) * cos(true_anomaly) + cos(arg_of_pericenter) * sin(true_anomaly) * cos(inclination))
+    z_orb = r * (sin(true_anomaly) * sin(inclination))
+
+    # Transform ECI to ECEF
+    theta = omega_e * delta_t  # Earth rotation angle
+    x_ecef = x_orb * cos(theta) + y_orb * sin(theta)
+    y_ecef = -x_orb * sin(theta) + y_orb * cos(theta)
+    z_ecef = z_orb
+
+    return np.array([x_ecef, y_ecef, z_ecef])
+
+# Updated function to compute DOP values for a list of satellites over time
+def compute_dop_over_time(sat_params_list, receiver_position, start_time, duration_hours, resolution_seconds=900):
+    # Generate the time steps based on the start time, duration, and resolution
+    time_steps = [start_time + timedelta(seconds=i) for i in range(0, duration_hours * 3600, resolution_seconds)]
+    dop_data = {"dop": []}
+
+    # Loop over each time step to calculate satellite positions and DOP
+    for current_time in time_steps:
+        # Calculate the ECEF positions for all satellites at the current time
+        ecef_positions = [calculate_ecef(sat_params, current_time) for sat_params in sat_params_list]
+
+        # Determine the satellites visible from the receiver at the current time
+        visible_satellites = compute_visibility(receiver_position, ecef_positions)
+
+        # Compute DOP values based on visible satellites
+        dop = calculate_dop(receiver_position, visible_satellites)
+
+        # Store DOP values in the dictionary
+        if dop[0] is not None:  # Check if DOP values are valid
+            dop_data["dop"].append({
+                current_time.strftime('%H:%M'): {
+                    "GDOP": float(dop[0]),
+                    "PDOP": float(dop[1]),
+                    "HDOP": float(dop[2])
+                }
+            })
+        else:
+            dop_data["dop"].append({
+                current_time.strftime('%H:%M'): {
+                    "GDOP": None,
+                    "PDOP": None,
+                    "HDOP": None
+                }
+            })
+
+    return dop_data
+
+
+# Function to plot the DOP values over time with actual datetime values on the x-axis
+def plot_dop_over_time_with_datetime(time_steps, dop_values):
+    # Extract GDOP, PDOP, and HDOP values
     GDOP_values, PDOP_values, HDOP_values = zip(*[(gdop, pdop, hdop) if gdop is not None else (np.nan, np.nan, np.nan) for gdop, pdop, hdop in dop_values])
 
+    # Plot DOP values over time
     plt.figure(figsize=(10, 6))
-    plt.plot(actual_times, GDOP_values, label='GDOP', color='r')
-    plt.plot(actual_times, PDOP_values, label='PDOP', color='b')
-    plt.plot(actual_times, HDOP_values, label='HDOP', color='g')
-    
+    plt.plot(time_steps, GDOP_values, label='GDOP', color='r')
+    plt.plot(time_steps, PDOP_values, label='PDOP', color='b')
+    plt.plot(time_steps, HDOP_values, label='HDOP', color='g')
+
     plt.title('DOP Values Over Time')
-    plt.xlabel('Time (UTC)')
+    plt.xlabel('Time')
     plt.ylabel('DOP')
     plt.legend()
     plt.grid()
@@ -1193,26 +1223,39 @@ def plot_dop_over_time(dop_values, actual_times):
     plt.tight_layout()
     plt.show()
 
-# Example usage:
+# # Example usage
+# # Receiver position: latitude, longitude, altitude in meters
+# receiver_position = (45.0703, 7.6869, 300)  # Example location (Turin, Italy)
+
+# # Start time and duration for the analysis
+# start_time = datetime(2024, 10, 17, 12, 0, 0)  # Example start time
+# duration_hours = 6  # Duration in hours
+
+# # Calculate DOP over time and plot the results
+# time_steps, dop_values = compute_dop_over_time(satellite_params, receiver_position, start_time, duration_hours)
+# plot_dop_over_time_with_datetime(time_steps, dop_values)
+
+# # Output DOP values for inspection
+# for time, (GDOP, PDOP, HDOP) in zip(time_steps, dop_values):
+#     if GDOP is not None:
+#         print(f"{time}: GDOP = {GDOP:.2f}, PDOP = {PDOP:.2f}, HDOP = {HDOP:.2f}")
+#     else:
+#         print(f"{time}: Insufficient satellite coverage for DOP calculation.")
+
+
+# Example usage
 # Receiver position: latitude, longitude, altitude in meters
 receiver_position = (45.0703, 7.6869, 300)  # Example location (Turin, Italy)
 
-# Set the start time and duration
-start_time = datetime(2024, 10, 17, 12, 0, 0)  # Example start time in UTC
-duration_hours = 12
-resolution_seconds = 600  # 1-minute resolution
+# Start time and duration for the analysis
+start_time = datetime(2024, 10, 17, 12, 0, 0)  # Example start time
+duration_hours = 6  # Duration in hours
 
-# Example: Compute positions and visibility for the given satellites over the specified duration
-ecef_positions_list, actual_times_list = zip(*[calculate_ecef(sat_params, start_time, duration_hours, resolution_seconds) for sat_params in satellite_params])
-print(len(actual_times_list[0]))
-# Determine visibility for the receiver
-all_visible_satellites = [compute_visibility(receiver_position, ecef_positions) for ecef_positions in ecef_positions_list]
+# Calculate DOP over time
+dop_data = compute_dop_over_time(satellite_params, receiver_position, start_time, duration_hours)
 
-# Calculate DOP for each time step
-dop_values = [calculate_dop(receiver_position, visible_satellites) for visible_satellites in all_visible_satellites]
-
-# Plot the DOP values over time with real datetime values
-plot_dop_over_time(dop_values, actual_times_list[0])  # Use the first actual_times_list for plotting
+# Output DOP values for inspection
+print(dop_data)
 
 
 
@@ -1315,62 +1358,168 @@ def enu_to_az_el(enu):
 
 
 
+# import matplotlib.pyplot as plt
+# import numpy as np
+# from math import radians, degrees, sin, cos, atan2, sqrt
+
+# # Optimized function to compute satellite visibility over time
+# def compute_cumulative_visibility(receiver_position, satellite_positions_list, elevation_mask=10):
+#     visibility_count = []
+
+#     for satellite_positions in satellite_positions_list:
+#         count = 0
+#         for sat_pos in satellite_positions:
+#             enu = ecef_to_enu(receiver_position, sat_pos)
+#             _, elevation = enu_to_az_el(enu)
+#             if elevation >= elevation_mask:
+#                 count += 1
+#         visibility_count.append(count)
+
+#     return visibility_count
+
+# # Improved function to plot the number of visible satellites over time
+# def plot_cumulative_visibility_over_time(visibility_count, duration_hours):
+#     times = np.linspace(0, duration_hours, len(visibility_count))
+#     plt.figure(figsize=(10, 6))
+
+#     plt.plot(times, visibility_count, color='b', linewidth=1.5)
+#     plt.title("Number of Visible Satellites Over Time")
+#     plt.xlabel("Time (hours)")
+#     plt.ylabel("Number of Visible Satellites")
+#     plt.grid()
+#     plt.show()
+
+# # Optimized skyplot function
+# def skyplot_optimized(receiver_position, satellite_positions_list, elevation_mask=10):
+#     az_el_data = []
+
+#     for satellite_positions in satellite_positions_list:
+#         for sat_pos in satellite_positions:
+#             enu = ecef_to_enu(receiver_position, sat_pos)
+#             azimuth, elevation = enu_to_az_el(enu)
+#             if elevation >= elevation_mask:
+#                 az_el_data.append((azimuth, elevation))
+#                 break  # Stop after finding one visible satellite per time step
+
+#     # Skyplot with performance optimization
+#     fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(8, 8))
+#     ax.set_theta_zero_location('N')  # Zero degrees at the top (North)
+#     ax.set_theta_direction(-1)       # Plot clockwise
+    
+#     # Plot satellites
+#     for azimuth, elevation in az_el_data:
+#         ax.scatter(radians(azimuth), 90 - elevation, c='b', s=50, alpha=0.75)
+
+#     ax.set_title("Skyplot of Visible Satellites")
+#     ax.set_ylim(0, 90)
+#     ax.set_yticks(range(0, 91, 15))
+#     ax.set_yticklabels([f'{90 - el}°' for el in range(0, 91, 15)])
+#     ax.set_xticks(np.radians(np.arange(0, 360, 45)))
+#     ax.set_xticklabels(["N", "NE", "E", "SE", "S", "SW", "W", "NW"])
+
+#     plt.show()
+
+# # Example usage
+# receiver_position = (45.0703, 7.6869, 300)  # Example location (Turin, Italy)
+# duration_hours = 6
+
+# # List of ECEF positions for the given satellites
+# ecef_positions_list = [calculate_ecef(sat_params, duration_hours) for sat_params in satellite_params]
+
+# # Generate the optimized skyplot for the receiver position
+# skyplot_optimized(receiver_position, ecef_positions_list)
+
+
+
+
 import matplotlib.pyplot as plt
 import numpy as np
+from datetime import datetime, timedelta
 from math import radians, degrees, sin, cos, atan2, sqrt
 
-# Optimized function to compute satellite visibility over time
-def compute_cumulative_visibility(receiver_position, satellite_positions_list, elevation_mask=10):
-    visibility_count = []
+# Function to convert ECEF coordinates to ENU coordinates
+def ecef_to_enu(receiver_position, satellite_position):
+    lat, lon, alt = receiver_position
+    lat = radians(lat)
+    lon = radians(lon)
 
-    for satellite_positions in satellite_positions_list:
-        count = 0
-        for sat_pos in satellite_positions:
-            enu = ecef_to_enu(receiver_position, sat_pos)
-            _, elevation = enu_to_az_el(enu)
-            if elevation >= elevation_mask:
-                count += 1
-        visibility_count.append(count)
+    # Receiver ECEF position
+    x_r = alt * cos(lat) * cos(lon)
+    y_r = alt * cos(lat) * sin(lon)
+    z_r = alt * sin(lat)
 
-    return visibility_count
+    # Satellite ECEF position
+    x_s, y_s, z_s = satellite_position
 
-# Improved function to plot the number of visible satellites over time
-def plot_cumulative_visibility_over_time(visibility_count, duration_hours):
-    times = np.linspace(0, duration_hours, len(visibility_count))
-    plt.figure(figsize=(10, 6))
+    # Convert ECEF to ENU
+    dx = x_s - x_r
+    dy = y_s - y_r
+    dz = z_s - z_r
 
-    plt.plot(times, visibility_count, color='b', linewidth=1.5)
-    plt.title("Number of Visible Satellites Over Time")
-    plt.xlabel("Time (hours)")
-    plt.ylabel("Number of Visible Satellites")
-    plt.grid()
-    plt.show()
+    # ENU transformation matrix
+    e = -sin(lon) * dx + cos(lon) * dy
+    n = -sin(lat) * cos(lon) * dx - sin(lat) * sin(lon) * dy + cos(lat) * dz
+    u = cos(lat) * cos(lon) * dx + cos(lat) * sin(lon) * dy + sin(lat) * dz
 
-# Optimized skyplot function
-def skyplot_optimized(receiver_position, satellite_positions_list, elevation_mask=10):
-    az_el_data = []
+    return np.array([e, n, u])
 
-    for satellite_positions in satellite_positions_list:
-        for sat_pos in satellite_positions:
+# Function to convert ENU coordinates to azimuth and elevation
+def enu_to_az_el(enu):
+    e, n, u = enu
+    azimuth = degrees(atan2(e, n)) % 360
+    elevation = degrees(atan2(u, sqrt(e**2 + n**2)))
+    return azimuth, elevation
+
+# Function to compute satellite visibility over time and return azimuth-elevation pairs
+def compute_az_el_over_time(receiver_position, sat_params_list, start_time, duration_hours, resolution_seconds=900, elevation_mask=10):
+    # Generate the time steps based on the start time, duration, and resolution
+    time_steps = [start_time + timedelta(seconds=i) for i in range(0, duration_hours * 3600, resolution_seconds)]
+    az_el_data = {current_time: [] for current_time in time_steps}
+
+    # Loop over each time step to calculate satellite positions and azimuth/elevation
+    for current_time in time_steps:
+        # Calculate the ECEF positions for all satellites at the current time
+        ecef_positions = [calculate_ecef(sat_params, current_time) for sat_params in sat_params_list]
+
+        # Loop through each satellite and calculate azimuth and elevation
+        for sat_pos in ecef_positions:
             enu = ecef_to_enu(receiver_position, sat_pos)
             azimuth, elevation = enu_to_az_el(enu)
             if elevation >= elevation_mask:
-                az_el_data.append((azimuth, elevation))
-                break  # Stop after finding one visible satellite per time step
+                az_el_data[current_time].append((azimuth, elevation))
 
-    # Skyplot with performance optimization
+    return az_el_data
+
+# Function to plot the number of visible satellites over time with actual datetime values on the x-axis
+def plot_cumulative_visibility_over_time(az_el_data):
+    visibility_count = [len(az_el_data[time]) for time in az_el_data]
+    time_steps = list(az_el_data.keys())
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(time_steps, visibility_count, color='b', linewidth=1.5)
+    plt.title("Number of Visible Satellites Over Time")
+    plt.xlabel("Time")
+    plt.ylabel("Number of Visible Satellites")
+    plt.grid()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+# Optimized skyplot function to plot azimuth-elevation data for visible satellites
+def skyplot_optimized(receiver_position, az_el_data, elevation_mask=10):
     fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(8, 8))
     ax.set_theta_zero_location('N')  # Zero degrees at the top (North)
-    ax.set_theta_direction(-1)       # Plot clockwise
-    
-    # Plot satellites
-    for azimuth, elevation in az_el_data:
-        ax.scatter(radians(azimuth), 90 - elevation, c='b', s=50, alpha=0.75)
+    # ax.set_theta_direction(-1)       # Plot clockwise
+
+    # Plot satellites at each time step
+    for time, az_el_list in az_el_data.items():
+        for azimuth, elevation in az_el_list:
+            ax.scatter(radians(azimuth), 90 - elevation, c='b', s=50, alpha=0.75)
 
     ax.set_title("Skyplot of Visible Satellites")
     ax.set_ylim(0, 90)
     ax.set_yticks(range(0, 91, 15))
-    ax.set_yticklabels([f'{90 - el}°' for el in range(0, 91, 15)])
+    # ax.set_yticklabels([f'{90 - el}°' for el in range(0, 91, 15)])
     ax.set_xticks(np.radians(np.arange(0, 360, 45)))
     ax.set_xticklabels(["N", "NE", "E", "SE", "S", "SW", "W", "NW"])
 
@@ -1378,11 +1527,127 @@ def skyplot_optimized(receiver_position, satellite_positions_list, elevation_mas
 
 # Example usage
 receiver_position = (45.0703, 7.6869, 300)  # Example location (Turin, Italy)
+start_time = datetime(2024, 10, 17, 12, 0, 0)  # Example start time
 duration_hours = 6
 
-# List of ECEF positions for the given satellites
-ecef_positions_list = [calculate_ecef(sat_params, duration_hours) for sat_params in satellite_params]
 
-# Generate the optimized skyplot for the receiver position
-skyplot_optimized(receiver_position, ecef_positions_list)
+# Calculate azimuth and elevation over time and plot the results
+az_el_data = compute_az_el_over_time(receiver_position, satellite_params, start_time, duration_hours)
 
+plot_cumulative_visibility_over_time(az_el_data)
+# skyplot_optimized(receiver_position, az_el_data)
+
+
+
+# {
+#     "dop": [(time, GDOP, PDOP, HDOP), (time, GDOP, PDOP, HDOP), ...],
+#     "visibility": ,
+#     'skyplot': {"sat_object": "", }
+# }
+
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+from datetime import datetime, timedelta
+from math import radians, degrees, sin, cos, atan2, sqrt
+
+# Function to convert ECEF coordinates to ENU coordinates
+def ecef_to_enu(receiver_position, satellite_position):
+    lat, lon, alt = receiver_position
+    lat = radians(lat)
+    lon = radians(lon)
+
+    # Receiver ECEF position
+    x_r = alt * cos(lat) * cos(lon)
+    y_r = alt * cos(lat) * sin(lon)
+    z_r = alt * sin(lat)
+
+    # Satellite ECEF position
+    x_s, y_s, z_s = satellite_position
+
+    # Convert ECEF to ENU
+    dx = x_s - x_r
+    dy = y_s - y_r
+    dz = z_s - z_r
+
+    # ENU transformation matrix
+    e = -sin(lon) * dx + cos(lon) * dy
+    n = -sin(lat) * cos(lon) * dx - sin(lat) * sin(lon) * dy + cos(lat) * dz
+    u = cos(lat) * cos(lon) * dx + cos(lat) * sin(lon) * dy + sin(lat) * dz
+
+    return np.array([e, n, u])
+
+# Function to convert ENU coordinates to azimuth and elevation
+def enu_to_az_el(enu):
+    e, n, u = enu
+    azimuth = degrees(atan2(e, n)) % 360
+    elevation = degrees(atan2(u, sqrt(e**2 + n**2)))
+    return azimuth, elevation
+
+
+# Function to compute azimuth, elevation, and time data for each satellite
+def compute_satellite_data_over_time(receiver_position, sat_params_list, start_time, duration_hours, resolution_seconds=900, elevation_mask=10):
+    # Generate the time steps based on the start time, duration, and resolution
+    time_steps = [start_time + timedelta(seconds=i) for i in range(0, duration_hours * 3600, resolution_seconds)]
+    
+    # Initialize the dictionary to store satellite data, using OBJECT_NAME as the key
+    satellite_data = {
+        sat_params['OBJECT_NAME']: {"azimuth": [], "elevation": [], "time": []}
+        for sat_params in sat_params_list
+    }
+
+    # Loop over each time step to calculate satellite positions and azimuth/elevation
+    for current_time in time_steps:
+        # Calculate the ECEF positions for all satellites at the current time
+        ecef_positions = [calculate_ecef(sat_params, current_time) for sat_params in sat_params_list]
+
+        # Loop through each satellite and calculate azimuth and elevation
+        for idx, (sat_pos, sat_params) in enumerate(zip(ecef_positions, sat_params_list)):
+            enu = ecef_to_enu(receiver_position, sat_pos)
+            azimuth, elevation = enu_to_az_el(enu)
+            if elevation >= elevation_mask:
+                # Use OBJECT_NAME as the key for the satellite
+                sat_name = sat_params['OBJECT_NAME']
+                satellite_data[sat_name]["azimuth"].append(azimuth)
+                satellite_data[sat_name]["elevation"].append(elevation)
+                satellite_data[sat_name]["time"].append(current_time.strftime('%H:%M'))
+
+    return satellite_data
+
+
+# Function to plot the optimized skyplot with organized satellite data
+def skyplot_with_satellite_data(satellite_data):
+    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(8, 8))
+    ax.set_theta_zero_location('N')  # Zero degrees at the top (North)
+    ax.set_theta_direction(-1)       # Plot clockwise
+
+    # Plot data for each satellite
+    for sat, data in satellite_data.items():
+        azimuths = data["azimuth"]
+        elevations = data["elevation"]
+        ax.scatter([radians(az) for az in azimuths], [90 - el for el in elevations], label=sat, s=50, alpha=0.75)
+
+    ax.set_title("Skyplot of Visible Satellites")
+    ax.set_ylim(0, 90)
+    ax.set_yticks(range(0, 91, 15))
+    ax.set_yticklabels([f'{90 - el}°' for el in range(0, 91, 15)])
+    ax.set_xticks(np.radians(np.arange(0, 360, 45)))
+    ax.set_xticklabels(["N", "NE", "E", "SE", "S", "SW", "W", "NW"])
+    ax.legend(loc='upper right')
+
+    plt.show()
+
+# Example usage
+receiver_position = (45.0703, 7.6869, 300)  # Example location (Turin, Italy)
+start_time = datetime(2024, 10, 17, 12, 0, 0)  # Example start time
+duration_hours = 6
+
+# Calculate satellite data (azimuth, elevation, time) over time
+satellite_data = compute_satellite_data_over_time(receiver_position, satellite_params, start_time, duration_hours)
+
+# Plot the skyplot with the organized data
+skyplot_with_satellite_data(satellite_data)
+
+# Print the organized data structure
+print(satellite_data)
