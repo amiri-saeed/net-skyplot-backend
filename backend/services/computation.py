@@ -1,7 +1,15 @@
 # services/core_computation.py
-from services.data_integration import fetch_data_from_source
+from services.data_integration import Almanac
+from services.gnss import Satellite
 import json
 import os
+import datetime
+
+import cartopy.crs as ccrs
+import matplotlib.pyplot as plt
+
+
+
 
 def perform_computation(lon, lat, start, end, polygon, height):
     """
@@ -9,7 +17,10 @@ def perform_computation(lon, lat, start, end, polygon, height):
     This may involve fetching additional data, processing input parameters, etc.
     """
     # Example of fetching data using the data_integration service
-    # external_data = fetch_data_from_source("almanac")
+    # external_data = Almanac.fetch("almanac")
+
+
+
 
     external_data = json.load(open("services/data_gps.json"))["DATA"]
 
@@ -26,3 +37,5 @@ def perform_computation(lon, lat, start, end, polygon, height):
     }
 
     return result
+
+
