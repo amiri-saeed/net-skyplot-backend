@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  api_gateway:
+    build: ./api_gateway
+    ports:
+      - "5000:5000"
+    depends_on:
+      - data_integrator
+      - computations
+    networks:
+      - net-skyplot
+
+  data_integrator:
+    build: ./data_integrator
+    ports:
+      - "5001:5001"
+    networks:
+      - net-skyplot
+    
+
+  computations:
+    build: ./computations
+    ports:
+      - "5002:5002"
+    depends_on:
+    - data_integrator
+    networks:
+      - net-skyplot
+
+networks:
+  net-skyplot:
+    driver: bridge
